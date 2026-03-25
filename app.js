@@ -31,7 +31,7 @@ const appState = {
     isCompletingOrder: false,
     isReleasingOrder: false,
     isReportingIssue: false,
-    shouldReloadOnResume: false
+    
 };
 
 let pendingReopenParams = null; 
@@ -186,17 +186,20 @@ document.addEventListener('visibilitychange', () => {
     const currentOrderId = appState.currentOrder?.id || appState.currentOwnInProgressOrderId || null;
 
     if (document.visibilityState === 'hidden') {
-        appState.shouldReloadOnResume = !!isPickViewActive;
         if (isPickViewActive && currentOrderId) {
             saveResumeOrderId(currentOrderId);
+            localStorage.setItem('resume_reload_pending', '1');
         }
         return;
     }
 
-    if (document.visibilityState === 'visible' && appState.shouldReloadOnResume) {
-        appState.shouldReloadOnResume = false;
-        showToast('Reconectando pedido...', 'info');
-        setTimeout(() => location.reload(), 150);
+    if (document.visibilityState === 'visible') {
+        const shouldReload = localStorage.getItem('resume_reload_pending') === '1';
+        if (shouldReload) {
+            localStorage.removeItem('resume_reload_pending');
+            showToast('Reconectando pedido...', 'info');
+            setTimeout(() => location.reload(), 150);
+        }
     }
 });
 
@@ -352,19 +355,18 @@ async function bootstrapSession() {
 
     const resumeOrderId = getResumeOrderId();
 
-    if (role === 'worker' && resumeOrderId) {
-      try {
-        appState.currentOwnInProgressOrderId = resumeOrderId;
-        await loadOrderForPicking(resumeOrderId);
-        clearResumeOrderId();
-        return;
-      } catch (resumeErr) {
-        console.error('No se pudo reabrir el pedido al volver:', resumeErr);
-        clearResumeOrderId();
-      }
-    }
+if (role === 'worker' && resumeOrderId) {
+  try {
+    appState.currentOwnInProgressOrderId = resumeOrderId;
+    await loadOrderForPicking(resumeOrderId);
+    return;
+  } catch (resumeErr) {
+    console.error('No se pudo reabrir el pedido al volver:', resumeErr);
+    clearResumeOrderId();
+  }
+}
 
-    await routeByRole();
+await routeByRole();
   } catch (err) {
     setStatus('loadingStatus', '💥 ERROR: ' + translateError(err), 'var(--err)');
     const loadingBox = $('view-loading').querySelector('.card');
