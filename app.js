@@ -191,34 +191,18 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
-// 1. GESTIÓN DE RECONEXIÓN CON "ESCAPE DE EMERGENCIA"
-// Reemplaza tu función rehydrateApp y el listener de visibilitychange por esto:
-
 async function rehydrateApp() {
-    // Si ya estamos rehidratando o no hay usuario, ignoramos.
     if (!appState.user || appState.isRehydrating) return;
     
     appState.isRehydrating = true;
-    console.log("🔄 Iniciando rehidratación de seguridad...");
-
-    // ESCAPE DE EMERGENCIA: Si en 7 segundos la red no responde, 
-    // liberamos la UI sí o sí para que el operario no quede trabado.
-    const safetyTimeout = setTimeout(() => {
-        if (appState.isRehydrating) {
-            appState.isRehydrating = false;
-            console.warn("⚠️ Rehidratación forzada por timeout.");
-            if ($('view-pick').classList.contains('active')) renderCurrentOrder(false);
-        }
-    }, 7000);
     
     try {
-        // Validamos sesión sin bloquear el hilo principal agresivamente
         const { data: { session } } = await sb.auth.getSession();
         if (!session) throw new Error("Sesión expirada");
 
         const isPicking = $('view-pick').classList.contains('active');
         
-        // Si el operario está adentro de un pedido, verificamos que siga siendo suyo
+        // Verificamos propiedad del pedido silenciosamente
         if (isPicking && appState.currentOrder) {
             const { data, error } = await sb.from('orders')
                 .select('status, taken_by')
@@ -228,6 +212,7 @@ async function rehydrateApp() {
             if (!error && data) {
                 if (data.status !== 'in_progress' || data.taken_by !== appState.user.id) {
                     showToast('Este pedido ya no está asignado a vos.', 'warn');
+                    clearDraftLocal(appState.currentOrder.id); // Limpiamos la memoria local
                     appState.currentOrder = null;
                     appState.currentOwnInProgressOrderId = null;
                     showView('view-worker-home');
@@ -237,91 +222,37 @@ async function rehydrateApp() {
             }
         }
 
-        // Actualizamos las listas en segundo plano
         if ($('view-worker-home').classList.contains('active')) refreshWorkerHome();
         if ($('view-admin').classList.contains('active')) refreshAdminPanel();
 
     } catch(e) {
         console.error("Falla silenciosa en rehidratación:", e);
     } finally {
-        clearTimeout(safetyTimeout);
         appState.isRehydrating = false;
-        // Refrescamos la UI una última vez para asegurar que los botones se activen
         if ($('view-pick').classList.contains('active')) renderCurrentOrder(false);
     }
 }
 
-// Escuchamos el cambio de pestaña de forma más inteligente
-document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-        // Al volver, siempre priorizamos la fluidez. 
-        // Si hay internet, intentamos sincronizar.
-        if (navigator.onLine) {
-            rehydrateApp();
-        }
-    }
-});
+// =========================================================
+// ALMACENAMIENTO LOCAL DE TILDES (OFFLINE DRAFT)
+// =========================================================
+function saveDraftLocal(orderId, items) {
+    const checks = items.map(i => ({ id: i.id, checked: i.checked }));
+    localStorage.setItem(`draft_order_${orderId}`, JSON.stringify(checks));
+}
 
-// 2. RENDERIZADO NO BLOQUEANTE
-// Reemplaza tu función renderCurrentOrder por esta:
+function loadDraftLocal(orderId, items) {
+    const saved = localStorage.getItem(`draft_order_${orderId}`);
+    if (!saved) return items;
+    try {
+        const checks = JSON.parse(saved);
+        const checkMap = Object.fromEntries(checks.map(c => [c.id, c.checked]));
+        return items.map(i => ({ ...i, checked: checkMap[i.id] !== undefined ? checkMap[i.id] : i.checked }));
+    } catch { return items; }
+}
 
-function renderCurrentOrder(fullRedraw = false) {
-  const order = appState.currentOrder;
-  if (!order) return;
-
-  const items = Array.isArray(order.order_items) ? order.order_items : [];
-  const totalQty = items.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
-  const checkedCount = items.filter(i => i.checked).length;
-  const remainingCount = items.length - checkedCount;
-
-  if (fullRedraw) {
-      // (Mantén tu lógica de dibujado de items aquí...)
-      $('pickBuyer').textContent = order.buyer_name || '-';
-      $('pickSaleId').textContent = order.display_id || order.sale_id || '-';
-      $('pickQty').textContent = totalQty;
-      // ... resto del código de dibujado de la lista ...
-      const box = $('pickItemsContainer');
-      box.innerHTML = items.map(item => {
-          const url = getMlUrl(item.pub_id);
-          return `
-            <div class="pick-item-card ${item.checked ? 'checked' : ''}">
-              <div class="item-header-row">
-                <div class="check-container">
-                  <input type="checkbox" id="chk_${item.id}" class="item-check" ${item.checked ? 'checked' : ''} onchange="toggleOrderItem('${item.id}', this.checked)" />
-                </div>
-                <div class="product-title">${escapeHtml(item.title || 'Producto')}</div>
-                <div class="item-qty">x${Number(item.qty) || 0}</div>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Variante:</span>
-                <span class="detail-value variant-text">${escapeHtml(item.variant || '-')}</span>
-              </div>
-            </div>
-          `;
-      }).join('');
-  }
-
-  const btnComplete = $('btnCompleteOrder');
-  const isReadyToComplete = (items.length > 0 && remainingCount === 0);
-  
-  // LA CLAVE DEL "10": 
-  // Eliminamos appState.isRehydrating del disabled. 
-  // Permitimos que el usuario intente confirmar siempre que los items estén listos.
-  btnComplete.disabled = !isReadyToComplete || appState.isCompletingOrder;
-  
-  if (appState.isCompletingOrder) {
-      btnComplete.textContent = 'Guardando en la nube...';
-      $('pickTopStatus').textContent = `ENVIANDO`;
-      $('pickTopStatus').style.color = 'var(--warn)';
-  } else if (isReadyToComplete) {
-      btnComplete.textContent = '✅ Confirmar y Cerrar';
-      $('pickTopStatus').textContent = `LISTO`;
-      $('pickTopStatus').style.color = 'var(--ok)';
-  } else {
-      btnComplete.textContent = `Faltan ${remainingCount} productos...`;
-      $('pickTopStatus').textContent = `PREPARANDO`;
-      $('pickTopStatus').style.color = 'var(--text)';
-  }
+function clearDraftLocal(orderId) {
+    localStorage.removeItem(`draft_order_${orderId}`);
 }
 
 // =========================================================
@@ -347,7 +278,6 @@ function initSupabase() {
   if (!window.supabase || typeof window.supabase.createClient !== 'function') {
     throw new Error('No cargó la librería de Supabase.');
   }
-  // PURGA: Supabase inicializado de forma 100% pura y nativa
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 }
 
@@ -1384,6 +1314,9 @@ async function loadOrderForPicking(orderId) {
 
     appState.currentOrder = data;
 
+    // MAGIA LOCAL: Recuperamos los tildes si la app se había cerrado o refrescado
+    appState.currentOrder.order_items = loadDraftLocal(data.id, data.order_items);
+
     if (appState.currentOrder.import_id) {
       try {
         const { data: batchOrders } = await sb.from('orders').select('status').eq('import_id', appState.currentOrder.import_id);
@@ -1498,6 +1431,9 @@ window.toggleOrderItem = function(itemId, checked) {
 
   item.checked = checked;
   item.checked_at = checked ? new Date().toISOString() : null;
+  
+  // Guardamos el estado en el teléfono al instante
+  saveDraftLocal(appState.currentOrder.id, appState.currentOrder.order_items);
 
   const checkbox = document.getElementById(`chk_${itemId}`);
   if (checkbox) {
@@ -1519,6 +1455,7 @@ async function completeCurrentOrder() {
   renderCurrentOrder(false); 
 
   const currentImportId = appState.currentOrder.import_id;
+  const orderId = appState.currentOrder.id;
 
   try {
     await ensureValidSession();
@@ -1531,9 +1468,11 @@ async function completeCurrentOrder() {
         if (error) throw error;
     }
 
-    const { error } = await sb.rpc('complete_order', { p_order_id: appState.currentOrder.id });
+    const { error } = await sb.rpc('complete_order', { p_order_id: orderId });
     if (error) throw error;
 
+    // Limpiamos la memoria local porque ya se confirmó
+    clearDraftLocal(orderId);
     appState.currentOwnInProgressOrderId = null;
     await proceedToNextOrHome(currentImportId);
     
@@ -1544,11 +1483,11 @@ async function completeCurrentOrder() {
     $('pickTopStatus').style.color = 'var(--danger)';
   } finally {
     appState.isCompletingOrder = false;
-    renderCurrentOrder(false);
+    if ($('view-pick').classList.contains('active')) renderCurrentOrder(false);
   }
 }
 
-// 💥 REPORTAR PROBLEMA (NUESTRA GUÍA) 💥
+// 💥 REPORTAR PROBLEMA Y LIBERAR 💥
 function promptReleaseOrder() {
     if (!appState.currentOrder || appState.isReleasingOrder) return;
     openModal('#modal-release-confirm');
@@ -1565,6 +1504,7 @@ async function executeReleaseOrder() {
     const { error } = await sb.rpc('release_order', { p_order_id: appState.currentOrder.id });
     if (error) throw error;
 
+    clearDraftLocal(appState.currentOrder.id);
     appState.currentOwnInProgressOrderId = null;
     appState.currentOrder = null;
 
@@ -1586,6 +1526,7 @@ async function reportCurrentIssue() {
   const reason = $('issueReason').value;
   const note = $('issueNote').value.trim();
   const currentImportId = appState.currentOrder.import_id;
+  const orderId = appState.currentOrder.id;
 
   appState.isReportingIssue = true;
   closeModal('#modal-overlay');
@@ -1593,10 +1534,11 @@ async function reportCurrentIssue() {
   try {
     await ensureValidSession();
     const { error } = await sb.rpc('report_order_issue', {
-      p_order_id: appState.currentOrder.id, p_issue_reason: reason, p_issue_note: note || null
+      p_order_id: orderId, p_issue_reason: reason, p_issue_note: note || null
     });
     if (error) throw error;
 
+    clearDraftLocal(orderId);
     appState.currentOwnInProgressOrderId = null;
     $('issueNote').value = '';
     
