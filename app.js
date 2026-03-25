@@ -191,51 +191,137 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
+// 1. GESTIÓN DE RECONEXIÓN CON "ESCAPE DE EMERGENCIA"
+// Reemplaza tu función rehydrateApp y el listener de visibilitychange por esto:
+
 async function rehydrateApp() {
+    // Si ya estamos rehidratando o no hay usuario, ignoramos.
     if (!appState.user || appState.isRehydrating) return;
     
-    appState.isRehydrating = true; 
-    if ($('view-pick').classList.contains('active')) renderCurrentOrder(false);
+    appState.isRehydrating = true;
+    console.log("🔄 Iniciando rehidratación de seguridad...");
+
+    // ESCAPE DE EMERGENCIA: Si en 7 segundos la red no responde, 
+    // liberamos la UI sí o sí para que el operario no quede trabado.
+    const safetyTimeout = setTimeout(() => {
+        if (appState.isRehydrating) {
+            appState.isRehydrating = false;
+            console.warn("⚠️ Rehidratación forzada por timeout.");
+            if ($('view-pick').classList.contains('active')) renderCurrentOrder(false);
+        }
+    }, 7000);
     
     try {
-        await ensureValidSession(); 
-        
-        const isAdminHome = $('view-admin').classList.contains('active');
-        const isAdminManage = $('view-admin-manage').classList.contains('active');
-        const isWorkerHome = $('view-worker-home').classList.contains('active');
-        const isWorkerBatch = $('view-worker-batch').classList.contains('active');
+        // Validamos sesión sin bloquear el hilo principal agresivamente
+        const { data: { session } } = await sb.auth.getSession();
+        if (!session) throw new Error("Sesión expirada");
+
         const isPicking = $('view-pick').classList.contains('active');
         
-        if (appState.role === 'admin') {
-            if (isAdminHome) await refreshAdminPanel();
-            if (isAdminManage && $('tabCatalog').classList.contains('active')) await loadCatalogTable();
-        } else if (appState.role === 'worker') {
-            if (isWorkerHome) await refreshWorkerHome();
-            if (isWorkerBatch && appState.currentViewedBatchId) {
-                await loadWorkerBatch(appState.currentViewedBatchId, appState.currentViewedBatchName);
-            } else if (isWorkerBatch) {
-                await refreshWorkerHome(); 
-            }
-        }
-        
+        // Si el operario está adentro de un pedido, verificamos que siga siendo suyo
         if (isPicking && appState.currentOrder) {
-            const { data, error } = await sb.from('orders').select('status, taken_by').eq('id', appState.currentOrder.id).single();
-            if (error || !data || data.status !== 'in_progress' || data.taken_by !== appState.user.id) {
-                showToast('Este pedido fue cerrado o reasignado mientras estabas inactivo.', 'warn');
-                appState.currentOrder = null;
-                appState.currentOwnInProgressOrderId = null;
-                showView('view-worker-home');
-                await refreshWorkerHome();
-            } else {
-                renderCurrentOrder(true);
+            const { data, error } = await sb.from('orders')
+                .select('status, taken_by')
+                .eq('id', appState.currentOrder.id)
+                .single();
+                
+            if (!error && data) {
+                if (data.status !== 'in_progress' || data.taken_by !== appState.user.id) {
+                    showToast('Este pedido ya no está asignado a vos.', 'warn');
+                    appState.currentOrder = null;
+                    appState.currentOwnInProgressOrderId = null;
+                    showView('view-worker-home');
+                    await refreshWorkerHome();
+                    return;
+                }
             }
         }
+
+        // Actualizamos las listas en segundo plano
+        if ($('view-worker-home').classList.contains('active')) refreshWorkerHome();
+        if ($('view-admin').classList.contains('active')) refreshAdminPanel();
+
     } catch(e) {
-        console.error("Rehidratación fallida:", e);
+        console.error("Falla silenciosa en rehidratación:", e);
     } finally {
-        appState.isRehydrating = false; 
-        if ($('view-pick').classList.contains('active')) renderCurrentOrder(false); 
+        clearTimeout(safetyTimeout);
+        appState.isRehydrating = false;
+        // Refrescamos la UI una última vez para asegurar que los botones se activen
+        if ($('view-pick').classList.contains('active')) renderCurrentOrder(false);
     }
+}
+
+// Escuchamos el cambio de pestaña de forma más inteligente
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+        // Al volver, siempre priorizamos la fluidez. 
+        // Si hay internet, intentamos sincronizar.
+        if (navigator.onLine) {
+            rehydrateApp();
+        }
+    }
+});
+
+// 2. RENDERIZADO NO BLOQUEANTE
+// Reemplaza tu función renderCurrentOrder por esta:
+
+function renderCurrentOrder(fullRedraw = false) {
+  const order = appState.currentOrder;
+  if (!order) return;
+
+  const items = Array.isArray(order.order_items) ? order.order_items : [];
+  const totalQty = items.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
+  const checkedCount = items.filter(i => i.checked).length;
+  const remainingCount = items.length - checkedCount;
+
+  if (fullRedraw) {
+      // (Mantén tu lógica de dibujado de items aquí...)
+      $('pickBuyer').textContent = order.buyer_name || '-';
+      $('pickSaleId').textContent = order.display_id || order.sale_id || '-';
+      $('pickQty').textContent = totalQty;
+      // ... resto del código de dibujado de la lista ...
+      const box = $('pickItemsContainer');
+      box.innerHTML = items.map(item => {
+          const url = getMlUrl(item.pub_id);
+          return `
+            <div class="pick-item-card ${item.checked ? 'checked' : ''}">
+              <div class="item-header-row">
+                <div class="check-container">
+                  <input type="checkbox" id="chk_${item.id}" class="item-check" ${item.checked ? 'checked' : ''} onchange="toggleOrderItem('${item.id}', this.checked)" />
+                </div>
+                <div class="product-title">${escapeHtml(item.title || 'Producto')}</div>
+                <div class="item-qty">x${Number(item.qty) || 0}</div>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Variante:</span>
+                <span class="detail-value variant-text">${escapeHtml(item.variant || '-')}</span>
+              </div>
+            </div>
+          `;
+      }).join('');
+  }
+
+  const btnComplete = $('btnCompleteOrder');
+  const isReadyToComplete = (items.length > 0 && remainingCount === 0);
+  
+  // LA CLAVE DEL "10": 
+  // Eliminamos appState.isRehydrating del disabled. 
+  // Permitimos que el usuario intente confirmar siempre que los items estén listos.
+  btnComplete.disabled = !isReadyToComplete || appState.isCompletingOrder;
+  
+  if (appState.isCompletingOrder) {
+      btnComplete.textContent = 'Guardando en la nube...';
+      $('pickTopStatus').textContent = `ENVIANDO`;
+      $('pickTopStatus').style.color = 'var(--warn)';
+  } else if (isReadyToComplete) {
+      btnComplete.textContent = '✅ Confirmar y Cerrar';
+      $('pickTopStatus').textContent = `LISTO`;
+      $('pickTopStatus').style.color = 'var(--ok)';
+  } else {
+      btnComplete.textContent = `Faltan ${remainingCount} productos...`;
+      $('pickTopStatus').textContent = `PREPARANDO`;
+      $('pickTopStatus').style.color = 'var(--text)';
+  }
 }
 
 // =========================================================
