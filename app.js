@@ -162,65 +162,27 @@ function closeModal(id) { const el = $(id.replace('#','')); if(el) el.classList.
 let sb = null;
 
 async function ensureValidSession() {
-    const { data: { session }, error } = await sb.auth.getSession();
-    if (error || !session) {
-        showToast('Sesión expirada. Por favor, iniciá sesión nuevamente.', 'error');
+    if (!appState.user) {
+        showToast('Sesión no disponible. Iniciá sesión nuevamente.', 'error');
         await performLogout();
-        throw new Error("Sesión inválida");
+        throw new Error('Sesión inválida');
     }
-    return session;
+    return true;
 }
 
-// =========================================================
-// GESTIÓN DE RECONEXIÓN
-// =========================================================
 window.addEventListener('online', () => {
-    $('offlineBanner').classList.remove('active');
-    rehydrateApp();
+    const banner = $('offlineBanner');
+    if (banner) banner.classList.remove('active');
 });
 
 window.addEventListener('offline', () => {
-    $('offlineBanner').classList.add('active');
-});
-
-document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-        if (navigator.onLine) {
-            rehydrateApp();
-        }
-    }
+    const banner = $('offlineBanner');
+    if (banner) banner.classList.add('active');
 });
 
 async function rehydrateApp() {
-    if (!appState.user || appState.isRehydrating) return;
-    
-    appState.isRehydrating = true;
-    
-    try {
-        const { data: { session } } = await sb.auth.getSession();
-        if (!session) throw new Error("Sesión expirada");
-
-        const isPicking = $('view-pick').classList.contains('active');
-        
-        // Verificamos propiedad del pedido silenciosamente
-        if (isPicking && appState.currentOrder) {
-            const { data, error } = await sb.from('orders')
-                .select('status, taken_by')
-                .eq('id', appState.currentOrder.id)
-                .single();
-                
-            if (!error && data) {
-                if (data.status !== 'in_progress' || data.taken_by !== appState.user.id) {
-                    showToast('Este pedido ya no está asignado a vos.', 'warn');
-                    clearDraftLocal(appState.currentOrder.id); // Limpiamos la memoria local
-                    appState.currentOrder = null;
-                    appState.currentOwnInProgressOrderId = null;
-                    showView('view-worker-home');
-                    await refreshWorkerHome();
-                    return;
-                }
-            }
-        }
+    return;
+}
 
         if ($('view-worker-home').classList.contains('active')) refreshWorkerHome();
         if ($('view-admin').classList.contains('active')) refreshAdminPanel();
@@ -1407,7 +1369,7 @@ function renderCurrentOrder(fullRedraw = false) {
   
   const isReadyToComplete = (items.length > 0 && remainingCount === 0);
   
-  btnComplete.disabled = !isReadyToComplete || appState.isCompletingOrder || appState.isRehydrating;
+  btnComplete.disabled = !isReadyToComplete || appState.isCompletingOrder;
   
   if (appState.isCompletingOrder) {
       btnComplete.textContent = 'Cerrando...';
