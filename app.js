@@ -12,19 +12,23 @@ const appState = {
     user: null,
     role: null,
     
+    // Contexto Operativo
     currentOrder: null,
     currentOwnInProgressOrderId: null,
     currentViewedBatchId: null,
     currentViewedBatchName: '',
     
+    // Filtros
     adminImports: [],
     adminFilter: 'Todas',
     workerImports: [],
     workerFilter: 'Todas',
     
+    // Cargas de Archivos
     selectedVentasFile: null,
     selectedPublicacionesFile: null,
     
+    // LOCKS Y PROTECCIONES GLOBALES
     isBootstrapping: false,
     isRehydrating: false,
     isTakingOrder: false,
@@ -32,10 +36,91 @@ const appState = {
     isReleasingOrder: false,
     isReportingIssue: false,
     
+    // Ticket identificador de sesión
     sessionTicket: Date.now() 
 };
 
 let pendingReopenParams = null; 
+let lastNetworkStatus = 'OK'; // Variable para el panel de diagnóstico
+
+// Asesino de conexiones de red muertas para lecturas (GET)
+let networkAborter = new AbortController();
+
+// =========================================================
+// 💥 FUNCIÓN DEL PANEL DE DIAGNÓSTICO (RAYOS X) 💥
+// =========================================================
+window.updateDebugBox = function(triggerName = '') {
+    const panel = document.getElementById('debugPanel');
+    if (!panel) return;
+
+    const order = appState.currentOrder;
+    const items = order?.order_items || [];
+    const total = items.length;
+    const checked = items.filter(i => i.checked).length;
+    const remaining = total - checked;
+    const isReady = (total > 0 && remaining === 0);
+    
+    const btn = document.getElementById('btnCompleteOrder');
+    const btnState = btn ? (btn.disabled ? 'BLOQUEADO' : 'HABILITADO') : 'N/A';
+    const btnText = btn ? btn.textContent : 'N/A';
+
+    let itemsStr = items.map((it, idx) => `[${it.checked ? 'X' : ' '}] item_${idx+1}`).join(' | ');
+    if (itemsStr === '') itemsStr = 'Vacío';
+
+    const debugText = `[ EVENTO TRIGGER ]: ${triggerName}
+[ HORA ]: ${new Date().toLocaleTimeString()}
+[ ESTADO PESTAÑA ]: ${document.visibilityState}
+[ TICKETS ]: Session=${appState.sessionTicket}
+[ VARIABLES GLOBALES ]: 
+  - isCompletingOrder: ${appState.isCompletingOrder}
+  - isRehydrating: ${appState.isRehydrating}
+[ ESTADO MEMORIA PEDIDO ]: 
+  - Total: ${total} | Tildados: ${checked} | Faltan: ${remaining}
+  - Matemática isReady: ${isReady}
+[ ESTADO REAL DEL BOTON ]: ${btnState} ("${btnText}")
+[ ARRAY MEMORIA ]: ${itemsStr}
+[ RED SUPABASE ]: ${lastNetworkStatus}`;
+
+    panel.textContent = debugText;
+};
+
+// =========================================================
+// DESFIBRILADOR TCP Y PETICIONES
+// =========================================================
+function sbFetch(url, options) {
+    const isGet = !options || !options.method || options.method.toUpperCase() === 'GET';
+    
+    if (isGet) {
+        return fetch(url, { ...options, signal: networkAborter.signal })
+          .catch(err => { lastNetworkStatus = 'AbortError (GET)'; updateDebugBox('sbFetch_GET_catch'); throw err; });
+    }
+
+    return new Promise((resolve, reject) => {
+        const attempt = async (retriesLeft) => {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3500); 
+
+            try {
+                const res = await fetch(url, { ...options, signal: controller.signal });
+                clearTimeout(timeoutId);
+                lastNetworkStatus = 'OK (POST)';
+                resolve(res);
+            } catch (err) {
+                clearTimeout(timeoutId);
+                if (retriesLeft > 0) {
+                    lastNetworkStatus = `REINTENTO (${retriesLeft})`;
+                    updateDebugBox('sbFetch_POST_retry');
+                    attempt(retriesLeft - 1);
+                } else {
+                    lastNetworkStatus = 'ERROR FINAL (POST)';
+                    updateDebugBox('sbFetch_POST_fail');
+                    reject(err);
+                }
+            }
+        };
+        attempt(2); 
+    });
+}
 
 // =========================================================
 // HELPERS UI & NETWORK & MAPS
@@ -50,6 +135,13 @@ const orderStatusMap = {
   'prepared': 'Completado',
   'issue': 'Problema',
   'taken': 'Tomado' 
+};
+
+const runWithTimeout = (promise, ms = 10000, errorMsg = 'La conexión expiró. Tocá de nuevo.') => {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(errorMsg)), ms))
+    ]);
 };
 
 function showToast(msg, type = 'info') {
@@ -136,6 +228,7 @@ function statusTag(rawStatus) {
 function translateError(err) {
   if (!err) return 'Error desconocido.';
   if (typeof err === 'string') return err;
+  if (err.name === 'AbortError') return 'Conexión interrumpida por el sistema.';
   if (err.message) return err.message;
   return JSON.stringify(err);
 }
@@ -174,7 +267,7 @@ async function ensureValidSession() {
 }
 
 // =========================================================
-// GESTIÓN DE RECONEXIÓN
+// GESTIÓN DE RECONEXIÓN Y ESTADOS ZOMBIES
 // =========================================================
 window.addEventListener('online', () => {
     $('offlineBanner').classList.remove('active');
@@ -186,15 +279,27 @@ window.addEventListener('offline', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
+    if (document.visibilityState === 'hidden') {
+        networkAborter.abort();
+        networkAborter = new AbortController();
+        updateDebugBox('visibility_hidden');
+    } 
+    else if (document.visibilityState === 'visible') {
+        networkAborter.abort();
+        networkAborter = new AbortController();
+
         appState.sessionTicket = Date.now(); 
         appState.isTakingOrder = false;
         appState.isReleasingOrder = false;
         appState.isCompletingOrder = false;
 
         if ($('view-pick').classList.contains('active')) {
+            $('pickTopStatus').textContent = 'Revisando red...';
+            $('pickTopStatus').style.color = 'var(--warn)';
             renderCurrentOrder(false); 
         }
+        
+        updateDebugBox('visibility_visible');
 
         if (navigator.onLine) {
             rehydrateApp();
@@ -206,44 +311,52 @@ async function rehydrateApp() {
     if (!appState.user || appState.isRehydrating) return;
     
     appState.isRehydrating = true; 
+    updateDebugBox('rehydrateApp_start');
     
     try {
-        await ensureValidSession(); 
-        
-        const isAdminHome = $('view-admin').classList.contains('active');
-        const isAdminManage = $('view-admin-manage').classList.contains('active');
-        const isWorkerHome = $('view-worker-home').classList.contains('active');
-        const isWorkerBatch = $('view-worker-batch').classList.contains('active');
-        const isPicking = $('view-pick').classList.contains('active');
-        
-        if (appState.role === 'admin') {
-            if (isAdminHome) await refreshAdminPanel();
-            if (isAdminManage && $('tabCatalog').classList.contains('active')) await loadCatalogTable();
-        } else if (appState.role === 'worker') {
-            if (isWorkerHome) await refreshWorkerHome();
-            if (isWorkerBatch && appState.currentViewedBatchId) {
-                await loadWorkerBatch(appState.currentViewedBatchId, appState.currentViewedBatchName);
-            } else if (isWorkerBatch) {
-                await refreshWorkerHome(); 
+        await runWithTimeout((async () => {
+            await ensureValidSession(); 
+            
+            const isAdminHome = $('view-admin').classList.contains('active');
+            const isAdminManage = $('view-admin-manage').classList.contains('active');
+            const isWorkerHome = $('view-worker-home').classList.contains('active');
+            const isWorkerBatch = $('view-worker-batch').classList.contains('active');
+            const isPicking = $('view-pick').classList.contains('active');
+            
+            if (appState.role === 'admin') {
+                if (isAdminHome) await refreshAdminPanel();
+                if (isAdminManage && $('tabCatalog').classList.contains('active')) await loadCatalogTable();
+            } else if (appState.role === 'worker') {
+                if (isWorkerHome) await refreshWorkerHome();
+                if (isWorkerBatch && appState.currentViewedBatchId) {
+                    await loadWorkerBatch(appState.currentViewedBatchId, appState.currentViewedBatchName);
+                } else if (isWorkerBatch) {
+                    await refreshWorkerHome(); 
+                }
             }
-        }
-        
-        if (isPicking && appState.currentOrder) {
-            const { data, error } = await sb.from('orders').select('status, taken_by').eq('id', appState.currentOrder.id).single();
-            if (error || !data || data.status !== 'in_progress' || data.taken_by !== appState.user.id) {
-                showToast('Este pedido fue cerrado o reasignado mientras estabas inactivo.', 'warn');
-                appState.currentOrder = null;
-                appState.currentOwnInProgressOrderId = null;
-                showView('view-worker-home');
-                await refreshWorkerHome();
-            } else {
-                renderCurrentOrder(true);
+            
+            if (isPicking && appState.currentOrder) {
+                const { data, error } = await sb.from('orders').select('status, taken_by').eq('id', appState.currentOrder.id).single();
+                if (error || !data || data.status !== 'in_progress' || data.taken_by !== appState.user.id) {
+                    showToast('Este pedido fue cerrado o reasignado mientras estabas inactivo.', 'warn');
+                    appState.currentOrder = null;
+                    appState.currentOwnInProgressOrderId = null;
+                    showView('view-worker-home');
+                    await refreshWorkerHome();
+                } else {
+                    renderCurrentOrder(true);
+                }
             }
-        }
+        })(), 12000, "Timeout en rehidratación");
+
     } catch(e) {
-        console.error("Rehidratación fallida:", e);
+        const isAbort = e.name === 'AbortError' || (e.message && e.message.toLowerCase().includes('abort'));
+        if (!isAbort) console.error("Rehidratación fallida:", e);
     } finally {
         appState.isRehydrating = false; 
+        updateDebugBox('rehydrateApp_end');
+        
+        // AGREGAR ESTA LÍNEA PARA QUE EL BOTÓN VUELVA A FUNCIONAR DESPUÉS DE DESPERTAR
         if ($('view-pick').classList.contains('active')) renderCurrentOrder(false); 
     }
 }
@@ -271,8 +384,9 @@ function initSupabase() {
   if (!window.supabase || typeof window.supabase.createClient !== 'function') {
     throw new Error('No cargó la librería de Supabase.');
   }
-  // Supabase inicializado con fetch nativo y robusto
-  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+      global: { fetch: sbFetch }
+  });
 }
 
 async function login() {
@@ -349,7 +463,10 @@ async function bootstrapSession() {
     appState.user = session.user;
     setStatus('loadingStatus', 'Sesión detectada. Consultando permisos...');
 
-    const role = await getMyRole();
+    const rolePromise = getMyRole();
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout consultando permisos')), 8000));
+    
+    const role = await Promise.race([rolePromise, timeoutPromise]);
     appState.role = role;
 
     if (!role) {
@@ -1269,28 +1386,34 @@ window.takeNextFromBlock = async function(importId) {
   setStatus('workerStatus', 'Buscando siguiente pedido...', 'var(--info)');
 
   try {
-    await ensureValidSession();
-    
-    const { data, error } = await sb.from('orders').select('id').eq('status', 'pending').eq('import_id', importId).order('created_at', { ascending: true }).limit(1);
-    if (error) throw error;
+    await runWithTimeout((async () => {
+        await ensureValidSession();
+        
+        const { data, error } = await sb.from('orders').select('id').eq('status', 'pending').eq('import_id', importId).order('created_at', { ascending: true }).limit(1);
+        if (error) throw error;
 
-    const target = (data || [])[0];
-    if (!target) throw new Error('No quedan pedidos pendientes en esta orden.');
+        const target = (data || [])[0];
+        if (!target) throw new Error('No quedan pedidos pendientes en esta orden.');
 
-    const { data: takenOrder, error: takeError } = await sb.rpc('take_order', { p_order_id: target.id });
-    if (takeError) {
-        showToast("El pedido fue tomado por otro compañero. Buscando otro...", "info");
-        await refreshWorkerHome();
-        return;
-    }
+        const { data: takenOrder, error: takeError } = await sb.rpc('take_order', { p_order_id: target.id });
+        if (takeError) {
+            showToast("El pedido fue tomado por otro compañero. Buscando otro...", "info");
+            await refreshWorkerHome();
+            return;
+        }
 
-    appState.currentOwnInProgressOrderId = takenOrder.id;
-    await loadOrderForPicking(takenOrder.id);
+        appState.currentOwnInProgressOrderId = takenOrder.id;
+        await loadOrderForPicking(takenOrder.id);
+    })(), 12000, "La red tardó mucho. Volvé a tocar el botón.");
+
   } catch (err) {
-    console.error(err);
-    showToast(translateError(err), 'error');
-    setStatus('workerStatus', 'No se pudo tomar el pedido.', 'var(--err)');
-    await refreshWorkerHome();
+    const isAbort = err.name === 'AbortError' || (err.message && err.message.toLowerCase().includes('abort'));
+    if (!isAbort) {
+        console.error(err);
+        showToast(translateError(err), 'error');
+        setStatus('workerStatus', 'No se pudo tomar el pedido.', 'var(--err)');
+        await refreshWorkerHome();
+    }
   } finally {
      appState.isTakingOrder = false;
   }
@@ -1397,6 +1520,7 @@ function renderCurrentOrder(fullRedraw = false) {
 
   const btnComplete = $('btnCompleteOrder');
   
+  // El botón NO puede presionarse si faltan items, si ya se está cerrando, O si la app se está despertando del altabeo
   const isReadyToComplete = (items.length > 0 && remainingCount === 0);
   
   btnComplete.disabled = !isReadyToComplete || appState.isCompletingOrder || appState.isRehydrating;
@@ -1414,6 +1538,8 @@ function renderCurrentOrder(fullRedraw = false) {
       $('pickTopStatus').textContent = `Preparando`;
       $('pickTopStatus').style.color = 'var(--text)';
   }
+  
+  updateDebugBox('renderCurrentOrder_end');
 }
 
 window.toggleOrderItem = function(itemId, checked) {
@@ -1433,40 +1559,47 @@ window.toggleOrderItem = function(itemId, checked) {
   }
   
   renderCurrentOrder(false); 
+  updateDebugBox('toggleOrderItem');
 };
 
-// 💥 CIERRE DE PEDIDO: CRUDO Y DIRECTO IGUAL QUE "REPORTAR PROBLEMA" 💥
+// 💥 CIERRE DE PEDIDO: SECUENCIAL ANTI-ATASCOS 💥
 async function completeCurrentOrder() {
   if (!appState.currentOrder || appState.isCompletingOrder) return;
 
   appState.isCompletingOrder = true;
+  updateDebugBox('completeOrder_start');
   renderCurrentOrder(false); 
 
   const currentImportId = appState.currentOrder.import_id;
 
   try {
-    await ensureValidSession();
-    
-    const items = appState.currentOrder.order_items || [];
-    
-    for (const item of items) {
-        const { error } = await sb.rpc('set_order_item_checked', { p_item_id: item.id, p_checked: item.checked });
+    await runWithTimeout((async () => {
+        await ensureValidSession();
+        
+        const items = appState.currentOrder.order_items || [];
+        
+        for (const item of items) {
+            const { error } = await sb.rpc('set_order_item_checked', { p_item_id: item.id, p_checked: item.checked });
+            if (error) throw error;
+        }
+
+        const { error } = await sb.rpc('complete_order', { p_order_id: appState.currentOrder.id });
         if (error) throw error;
-    }
 
-    const { error } = await sb.rpc('complete_order', { p_order_id: appState.currentOrder.id });
-    if (error) throw error;
+        appState.currentOwnInProgressOrderId = null;
+        await proceedToNextOrHome(currentImportId);
+    })(), 20000, "La red está inestable. Reintentá cerrar el pedido.");
 
-    appState.currentOwnInProgressOrderId = null;
-    await proceedToNextOrHome(currentImportId);
   } catch (err) {
     console.error(err);
     showToast(translateError(err), 'error');
     $('pickTopStatus').textContent = 'Error al cerrar';
     $('pickTopStatus').style.color = 'var(--danger)';
+    updateDebugBox('completeOrder_catch');
   } finally {
     appState.isCompletingOrder = false;
     renderCurrentOrder(false);
+    updateDebugBox('completeOrder_finally');
   }
 }
 
