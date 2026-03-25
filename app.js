@@ -1447,7 +1447,7 @@ window.toggleOrderItem = function(itemId, checked) {
   renderCurrentOrder(false); 
 };
 
-// 💥 CIERRE DE PEDIDO: SIMPLE Y PURO COMO "REPORTAR PROBLEMA" 💥
+// 💥 CIERRE DE PEDIDO: EN UN SOLO VIAJE (BULK) 💥
 async function completeCurrentOrder() {
   if (!appState.currentOrder || appState.isCompletingOrder) return;
 
@@ -1460,15 +1460,16 @@ async function completeCurrentOrder() {
   try {
     await ensureValidSession();
     
+    // Filtramos solo los IDs de los productos que el operario tildó
     const items = appState.currentOrder.order_items || [];
+    const checkedItemIds = items.filter(i => i.checked).map(i => i.id);
     
-    // Mandamos todo limpio a Supabase
-    for (const item of items) {
-        const { error } = await sb.rpc('set_order_item_checked', { p_item_id: item.id, p_checked: item.checked });
-        if (error) throw error;
-    }
-
-    const { error } = await sb.rpc('complete_order', { p_order_id: orderId });
+    // Mandamos 1 ÚNICA PETICIÓN con todos los datos
+    const { error } = await sb.rpc('complete_order_bulk', { 
+        p_order_id: orderId, 
+        p_checked_item_ids: checkedItemIds 
+    });
+    
     if (error) throw error;
 
     // Limpiamos la memoria local porque ya se confirmó
