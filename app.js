@@ -183,11 +183,18 @@ window.addEventListener('offline', () => {
 
 document.addEventListener('visibilitychange', () => {
     const isPickViewActive = $('view-pick')?.classList.contains('active');
-    const currentOrderId = appState.currentOrder?.id || appState.currentOwnInProgressOrderId || null;
+    const currentOrder = appState.currentOrder || null;
+    const currentOrderId = currentOrder?.id || appState.currentOwnInProgressOrderId || null;
 
     if (document.visibilityState === 'hidden') {
         if (isPickViewActive && currentOrderId) {
-            saveResumeOrderId(currentOrderId);
+            saveResumeContext({
+                orderId: currentOrderId,
+                importId: currentOrder?.import_id || null,
+                batchId: appState.currentViewedBatchId || currentOrder?.import_id || null,
+                batchName: appState.currentViewedBatchName || '',
+                fromView: 'view-pick'
+            });
             localStorage.setItem('resume_reload_pending', '1');
         }
         return;
@@ -229,17 +236,34 @@ function clearDraftLocal(orderId) {
     localStorage.removeItem(`draft_order_${orderId}`);
 }
 
-function saveResumeOrderId(orderId) {
-    if (!orderId) return;
-    localStorage.setItem('resume_order_id', String(orderId));
+function saveResumeContext(ctx = {}) {
+    const payload = {
+        orderId: ctx.orderId ? String(ctx.orderId) : null,
+        importId: ctx.importId ? String(ctx.importId) : null,
+        batchId: ctx.batchId ? String(ctx.batchId) : null,
+        batchName: ctx.batchName ? String(ctx.batchName) : '',
+        fromView: ctx.fromView ? String(ctx.fromView) : 'view-pick',
+        savedAt: new Date().toISOString()
+    };
+
+    if (!payload.orderId) return;
+    localStorage.setItem('resume_order_context', JSON.stringify(payload));
 }
 
-function getResumeOrderId() {
-    return localStorage.getItem('resume_order_id');
+function getResumeContext() {
+    try {
+        const raw = localStorage.getItem('resume_order_context');
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed?.orderId) return null;
+        return parsed;
+    } catch {
+        return null;
+    }
 }
 
-function clearResumeOrderId() {
-    localStorage.removeItem('resume_order_id');
+function clearResumeContext() {
+    localStorage.removeItem('resume_order_context');
 }
 
 // =========================================================
@@ -313,7 +337,7 @@ async function performLogout() {
   appState.selectedPublicacionesFile = null;
   
   pendingReopenParams = null;
-  clearResumeOrderId();
+  clearResumeContext();
   
   const vF = $('ventasFile'); if(vF) vF.value = '';
   const pF = $('publicacionesFile'); if(pF) pF.value = '';
@@ -353,16 +377,18 @@ async function bootstrapSession() {
     $('adminUserLabel').textContent = `${appState.user.email} | rol: ${translatedRole}`;
     $('workerUserLabel').textContent = `${appState.user.email} | rol: ${translatedRole}`;
 
-    const resumeOrderId = getResumeOrderId();
+    const resumeCtx = getResumeContext();
 
-if (role === 'worker' && resumeOrderId) {
+if (role === 'worker' && resumeCtx?.orderId) {
   try {
-    appState.currentOwnInProgressOrderId = resumeOrderId;
-    await loadOrderForPicking(resumeOrderId);
+    appState.currentOwnInProgressOrderId = resumeCtx.orderId;
+    appState.currentViewedBatchId = resumeCtx.batchId || null;
+    appState.currentViewedBatchName = resumeCtx.batchName || '';
+    await loadOrderForPicking(resumeCtx.orderId);
     return;
   } catch (resumeErr) {
     console.error('No se pudo reabrir el pedido al volver:', resumeErr);
-    clearResumeOrderId();
+    clearResumeContext();
   }
 }
 
@@ -1089,7 +1115,9 @@ async function continueOwnOrder() {
     renderCurrentOrder(true);
     return;
   }
-
+	if (!appState.currentViewedBatchId && appState.currentOrder?.import_id) {
+  appState.currentViewedBatchId = appState.currentOrder.import_id;
+}
   await loadOrderForPicking(appState.currentOwnInProgressOrderId);
 }
 
@@ -1314,7 +1342,13 @@ async function loadOrderForPicking(orderId) {
     if (error) throw error;
 
     appState.currentOrder = data;
-    saveResumeOrderId(data.id);
+    saveResumeContext({
+  orderId: data.id,
+  importId: data.import_id || null,
+  batchId: appState.currentViewedBatchId || data.import_id || null,
+  batchName: appState.currentViewedBatchName || '',
+  fromView: 'view-pick'
+});
 
     // MAGIA LOCAL: Recuperamos los tildes si la app se había cerrado o refrescado
     appState.currentOrder.order_items = loadDraftLocal(data.id, data.order_items);
@@ -1473,7 +1507,7 @@ async function completeCurrentOrder() {
     if (error) throw error;
 
     clearDraftLocal(orderId);
-    clearResumeOrderId();
+    clearResumeContext();
     appState.currentOrder = null;
     appState.currentOwnInProgressOrderId = null;
     await proceedToNextOrHome(currentImportId);
@@ -1507,7 +1541,7 @@ async function executeReleaseOrder() {
     if (error) throw error;
 
     clearDraftLocal(appState.currentOrder.id);
-    clearResumeOrderId();
+    clearResumeContext();
     appState.currentOwnInProgressOrderId = null;
     appState.currentOrder = null;
 
@@ -1542,7 +1576,7 @@ async function reportCurrentIssue() {
     if (error) throw error;
 
     clearDraftLocal(orderId);
-    clearResumeOrderId();
+    clearResumeContext();
     appState.currentOrder = null;
     appState.currentOwnInProgressOrderId = null;
     $('issueNote').value = '';
