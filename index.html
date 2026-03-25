@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Picking ML | Supabase</title>
+
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="offlineBanner">⚠️ Sin conexión a Internet. Reintentando...</div>
+  <div id="toast-container"></div>
+
+  <main>
+    <section id="view-login" class="view active">
+      <div class="wrap center-box">
+        <div class="card" style="width: 100%; max-width: 460px;">
+          <h1 class="text-center">Picking Mercado Libre</h1>
+          <p class="small text-center" style="margin-bottom: 16px;">Login real con Supabase</p>
+
+          <div class="row">
+            <div class="col" style="flex-basis: 100%;">
+              <label for="loginEmail">Email</label>
+              <input id="loginEmail" type="email" autocomplete="username" placeholder="tu@email.com" />
+            </div>
+            <div class="col" style="flex-basis: 100%;">
+              <label for="loginPassword">Contraseña</label>
+              <input id="loginPassword" type="password" autocomplete="current-password" placeholder="••••••••" />
+            </div>
+          </div>
+
+          <div style="margin-top: 12px;">
+            <button id="btnLogin" class="btn-primary">Ingresar</button>
+          </div>
+
+          <div id="loginStatus" class="small text-center" style="margin-top: 12px;" aria-live="polite">Esperando credenciales...</div>
+          <div id="loginError" class="msg text-center" aria-live="assertive"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-loading" class="view">
+      <div class="wrap center-box">
+        <div class="card" style="width: 100%; max-width: 420px; text-align: center;">
+          <div class="spinner"></div>
+          <h2 style="margin-bottom: 8px;">Cargando sistema...</h2>
+          <div id="loadingStatus" class="small" aria-live="polite">Inicializando...</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-admin" class="view">
+      <div class="wrap">
+        <div class="admin-top-card">
+          <div class="admin-top-inner">
+            <h1 class="admin-title">Panel Admin</h1>
+            <div class="admin-user-line">
+              <span id="adminUserLabel">-</span>
+            </div>
+
+            <div class="admin-actions">
+              <button id="btnAdminManage" class="btn-primary">➕ Nueva Orden / Catálogo</button>
+              <button id="btnAdminGoWorker" class="btn-info">Modo Operador</button>
+              <button id="btnAdminRefresh" class="btn-secondary">Actualizar</button>
+              <button id="btnAdminLogout" class="btn-danger">Salir</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="text-center">Resumen Global</h2>
+          <p class="small text-center" style="margin-bottom: 15px;">Tocá los recuadros para filtrar la lista de órdenes.</p>
+          <div class="grid-stats">
+            <div class="stat clickable" id="filter-Pendiente" onclick="filterAdminOrders('Pendiente')"><strong id="adminPending">0</strong><span class="small">Pendientes</span></div>
+            <div class="stat clickable" id="filter-EnProceso" onclick="filterAdminOrders('En Proceso')"><strong id="adminInProgress">0</strong><span class="small">En Proceso</span></div>
+            <div class="stat clickable" id="filter-Cerrada" onclick="filterAdminOrders('Cerrada')"><strong id="adminPrepared">0</strong><span class="small">Cerradas</span></div>
+            <div class="stat clickable" id="filter-ConProblemas" onclick="filterAdminOrders('Con Problemas')"><strong id="adminIssues">0</strong><span class="small">Problemas</span></div>
+            <div class="stat clickable active-filter" id="filter-Todas" onclick="filterAdminOrders('Todas')"><strong id="adminOrdersTotal">0</strong><span class="small">Total Órdenes</span></div>
+          </div>
+          <div id="adminStatus" class="small text-center" style="margin-top: 12px;" aria-live="polite">Listo.</div>
+          <div id="adminError" class="msg" aria-live="assertive"></div>
+          <div id="adminOk" class="msg text-center" aria-live="polite"></div>
+        </div>
+
+        <div class="card" style="margin-top: 15px;">
+          <div class="header-bar" style="justify-content: center;">
+            <h2 class="text-center" style="margin:0;">Lista de Órdenes de Trabajo</h2>
+          </div>
+          <div id="importsList" class="imports-list">
+            <div class="small text-center">Sin órdenes todavía.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-admin-manage" class="view">
+      <div class="wrap">
+        <div class="header-bar" style="align-items: center; margin-bottom: 20px;">
+          <button id="btnBackFromManage" class="btn-secondary" style="width: auto; padding: 8px 12px;">◀ Volver al Panel</button>
+          <h1 class="text-center" style="flex: 1; margin: 0; font-size: 1.5rem;">Gestión de Datos</h1>
+          <div style="width: 130px;"></div>
+        </div>
+
+        <div class="tabs justify-center">
+          <button id="tabVentasBtn" class="tab-btn active" onclick="switchAdminTab('ventas')">Crear Nueva Orden</button>
+          <button id="tabCatalogBtn" class="tab-btn" onclick="switchAdminTab('catalog')">Mi Catálogo</button>
+        </div>
+
+        <div id="tabVentas" class="tab-content active">
+          <div class="card" style="max-width: 600px; margin: 0 auto;">
+            <h2 class="text-center">Subir Archivo de Ventas</h2>
+            <div class="file-row">
+              <div>
+                <label for="ventasFile">Archivo Excel (ventas.xlsx)</label>
+                <input id="ventasFile" type="file" accept=".xlsx,.xls" />
+                <div id="ventasFileInfo" class="pill-file">Sin archivo</div>
+              </div>
+              <div>
+                <label for="blockName">Nombre de la Orden (Opcional)</label>
+                <input id="blockName" type="text" placeholder="Ej: Orden Matutina" />
+              </div>
+            </div>
+
+            <div class="row" style="margin-top: 14px;">
+              <button id="btnProcessImport" class="btn-primary">Crear Orden</button>
+              <button id="btnClearImport" class="btn-secondary">Limpiar</button>
+            </div>
+            <div class="tiny text-center" style="margin-top: 12px; color: var(--text-muted);">
+              Si no ponés nombre, se generará "Orden #XXXX" automáticamente.
+            </div>
+          </div>
+        </div>
+
+        <div id="tabCatalog" class="tab-content">
+          <div class="card" style="max-width: 600px; margin: 0 auto 15px auto;">
+            <h2 class="text-center">Actualizar Catálogo</h2>
+            <div class="row" style="align-items: flex-end;">
+              <div class="col">
+                <label for="publicacionesFile">Archivo de Publicaciones (publicaciones.xlsx)</label>
+                <input id="publicacionesFile" type="file" accept=".xlsx,.xls" />
+                <div id="publicacionesFileInfo" class="pill-file">Sin archivo</div>
+              </div>
+              <div class="col" style="flex-grow: 0;">
+                <button id="btnProcessCatalog" class="btn-primary">Subir Catálogo</button>
+              </div>
+            </div>
+            <div class="tiny text-center" style="margin-top: 12px;">
+              Sube este archivo únicamente cuando agregues productos nuevos a Mercado Libre o cambies un SKU.
+            </div>
+          </div>
+
+          <div class="card" style="max-width: 800px; margin: 0 auto;">
+            <h2 class="text-center">Productos Guardados (<span id="catalogCount">0</span>)</h2>
+            <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID (MLU)</th>
+                    <th>Título</th>
+                    <th>Variante</th>
+                  </tr>
+                </thead>
+                <tbody id="catalogTableBody">
+                  <tr><td colspan="3" class="small text-center">Cargando catálogo...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-worker-home" class="view">
+      <div class="wrap">
+        <div class="admin-top-card">
+          <div class="admin-top-inner">
+            <h1 class="admin-title">Panel Operario</h1>
+            <div class="admin-user-line">
+              <span id="workerUserLabel">-</span>
+            </div>
+            <div class="admin-actions">
+              <button id="btnWorkerGoAdmin" class="btn-info hidden">Panel Admin</button>
+              <button id="btnWorkerRefresh" class="btn-secondary">Actualizar</button>
+              <button id="btnWorkerLogout" class="btn-danger">Salir</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" id="workerCurrentOrderCard" style="display: none; border-color: var(--warn); margin-bottom: 15px;">
+          <h3 style="color: var(--warn);" class="text-center">¡Tenés un pedido en pausa!</h3>
+          <p class="small text-center" style="margin-bottom: 10px;">No podés tomar otras órdenes hasta cerrarlo.</p>
+          <button id="btnContinueOwnOrder" class="btn-primary">Continuar Preparando</button>
+        </div>
+
+        <div class="card">
+          <h2 class="text-center">Resumen Global</h2>
+          <p class="small text-center" style="margin-bottom: 15px;">Tocá los recuadros para filtrar la lista de órdenes.</p>
+          <div class="grid-stats">
+            <div class="stat clickable" id="filter-w-Pendiente" onclick="filterWorkerOrders('Pendiente')"><strong id="workerPending">0</strong><span class="small">Pendientes</span></div>
+            <div class="stat clickable" id="filter-w-EnProceso" onclick="filterWorkerOrders('En Proceso')"><strong id="workerInProgress">0</strong><span class="small">En Proceso</span></div>
+            <div class="stat clickable" id="filter-w-Cerrada" onclick="filterWorkerOrders('Cerrada')"><strong id="workerPrepared">0</strong><span class="small">Cerradas</span></div>
+            <div class="stat clickable" id="filter-w-ConProblemas" onclick="filterWorkerOrders('Con Problemas')"><strong id="workerIssues">0</strong><span class="small">Problemas</span></div>
+            <div class="stat clickable active-filter" id="filter-w-Todas" onclick="filterWorkerOrders('Todas')"><strong id="workerOrdersTotal">0</strong><span class="small">Total Órdenes</span></div>
+          </div>
+          <div id="workerStatus" class="small text-center" style="margin-top: 12px;" aria-live="polite">Listo.</div>
+          <div id="workerError" class="msg" aria-live="assertive"></div>
+          <div id="workerOk" class="msg text-center" aria-live="polite"></div>
+        </div>
+
+        <div class="card" style="margin-top: 15px;">
+          <div class="header-bar" style="justify-content: center;">
+            <h2 class="text-center" style="margin:0;">Lista de Órdenes de Trabajo</h2>
+          </div>
+          <div id="workerBlocksContainer" class="imports-list">
+            <div class="small text-center">Buscando órdenes de trabajo...</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-worker-batch" class="view">
+      <div class="wrap">
+        <div class="header-bar" style="align-items: center;">
+          <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+            <button class="btn-secondary" onclick="showView('view-worker-home'); refreshWorkerHome();" style="width: auto; padding: 8px 12px;">◀ Volver al Menú</button>
+            <h1 id="workerBatchTitle" style="margin: 0; font-size: 1.3rem;">Orden</h1>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="text-center">Lista de Pedidos de la Orden</h2>
+          <p class="small text-center" style="margin-bottom: 15px; line-height: 1.4;">
+            Acá podés ver todos los paquetes/pedidos que componen esta Orden.
+            Si tenés dudas con un paquete que ya cerraste, tocalo para <b>Reabrirlo y Revisarlo</b>.
+          </p>
+          <div id="workerBatchOrdersList" class="orders-list">
+            <div class="small text-center">Cargando pedidos...</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-pick" class="view">
+      <div class="wrap">
+        <div class="pick-header" style="align-items: center; display: flex; justify-content: space-between; gap: 5px;">
+          <div style="flex: 1; display: flex; justify-content: flex-start;">
+            <button id="btnBackToPanel" class="btn-back">◀ Volver</button>
+          </div>
+          <div style="flex: 1.5; display: flex; justify-content: center;">
+            <span id="pickProgressBadge" class="tag" style="font-size: 0.85rem; padding: 6px 12px; display: none; background: rgba(250, 204, 21, 0.15); color: var(--primary); border: 1px solid var(--primary-dark);"></span>
+          </div>
+          <div style="flex: 1; display: flex; justify-content: flex-end;">
+            <span id="pickTopStatus" class="small" style="font-weight: 600; text-transform: uppercase;">Preparando</span>
+          </div>
+        </div>
+
+        <div class="order-card">
+          <div class="order-header">
+            <div>
+              <span class="buyer-name" id="pickBuyer">-</span>
+              <span class="sale-id" id="pickSaleId">-</span>
+            </div>
+            <div class="qty-badge">
+              <div style="font-size: 0.7rem; line-height: 1;">TOTAL U.</div>
+              <span id="pickQty">0</span>
+            </div>
+          </div>
+
+          <div class="item-list" id="pickItemsContainer">
+            <div class="small text-center">Cargando items...</div>
+          </div>
+        </div>
+
+        <div id="debugPanel" style="background-color: #050505; color: #0f0; border: 2px solid #0f0; padding: 12px; font-family: monospace; font-size: 11px; line-height: 1.4; border-radius: 8px; margin: 15px 0; word-wrap: break-word;">
+          [ PANEL DE DIAGNÓSTICO INICIANDO... ]
+        </div>
+
+        <div class="action-area">
+          <button id="btnCompleteOrder" class="btn-pick-success" disabled>Tildá los productos...</button>
+          <div style="display: flex; gap: 10px;">
+            <button id="btnPromptRelease" class="btn-outline">⏭️ Saltar / Liberar</button>
+            <button id="btnShowIssueModal" class="btn-danger-outline">⚠️ Reportar problema</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="modal-overlay" class="modal-overlay">
+        <div class="modal-box">
+          <h3 class="text-center" style="color: var(--danger); font-size: 1.3rem;">⚠️ Reportar Problema</h3>
+          <p class="text-center" style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 15px;">El pedido volverá al panel con estado de problema.</p>
+
+          <select id="issueReason">
+            <option value="Falta de stock físico">❌ Falta de stock físico</option>
+            <option value="Producto dañado / fallado">💔 Producto dañado / fallado</option>
+            <option value="No encuentro el producto">🔍 No encuentro el producto</option>
+            <option value="Duda con variante/talle">❓ Duda con variante/talle</option>
+            <option value="Otro">Otro motivo (Aclarar en nota)</option>
+          </select>
+          <textarea id="issueNote" rows="3" placeholder="Agregar nota opcional..."></textarea>
+
+          <button id="btnReportIssue" class="btn-primary" style="background: var(--danger); color: white; border: none; margin-bottom: 10px;">Guardar Problema</button>
+          <button id="btnCloseIssueModal" class="btn-secondary">Cancelar</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="admin-orders-modal" class="modal-overlay">
+    <div class="modal-box" style="width: 100%; max-width: 800px; max-height: 90vh;">
+      <div class="header-bar" style="margin-bottom: 15px;">
+        <div>
+          <h3 id="adminModalTitle" style="margin: 0;">Pedidos de la Orden</h3>
+          <div id="adminModalSummary" class="small">Calculando resumen...</div>
+        </div>
+        <div class="row" style="margin-left: auto;">
+          <button class="btn-danger" id="btnCloseAdminOrdersModal" style="width: auto; padding: 6px 12px;">Cerrar ✕</button>
+        </div>
+      </div>
+      <div id="adminModalOrdersList" class="orders-list" style="overflow-y: auto;">
+        <div class="small text-center">Cargando pedidos...</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-release-confirm" class="modal-overlay">
+    <div class="modal-box">
+      <h3 class="text-center" style="font-size: 1.3rem;">⏭️ ¿Saltar Paquete?</h3>
+      <p class="text-center" style="color: var(--text-muted); font-size: 0.95rem; margin-bottom: 15px;">
+        Se desmarcarán los productos que tildaste y el paquete volverá a la lista para que otro operario pueda tomarlo.
+      </p>
+      <button id="btnConfirmRelease" class="btn-primary" style="margin-bottom: 10px;">Sí, saltar paquete</button>
+      <button id="btnCancelRelease" class="btn-secondary">Cancelar</button>
+    </div>
+  </div>
+
+  <div id="modal-reopen-confirm" class="modal-overlay">
+    <div class="modal-box">
+      <h3 class="text-center" style="font-size: 1.3rem;">🔓 ¿Reabrir Pedido?</h3>
+      <p class="text-center" style="color: var(--text-muted); font-size: 0.95rem; margin-bottom: 15px;">
+        El pedido volverá a estado "Pendiente" y lo vas a tomar automáticamente para corregirlo.
+      </p>
+      <button id="btnConfirmReopen" class="btn-primary" style="margin-bottom: 10px;">Sí, reabrir ahora</button>
+      <button id="btnCancelReopen" class="btn-secondary">Cancelar</button>
+    </div>
+  </div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
