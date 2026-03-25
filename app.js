@@ -184,17 +184,6 @@ async function rehydrateApp() {
     return;
 }
 
-        if ($('view-worker-home').classList.contains('active')) refreshWorkerHome();
-        if ($('view-admin').classList.contains('active')) refreshAdminPanel();
-
-    } catch(e) {
-        console.error("Falla silenciosa en rehidratación:", e);
-    } finally {
-        appState.isRehydrating = false;
-        if ($('view-pick').classList.contains('active')) renderCurrentOrder(false);
-    }
-}
-
 // =========================================================
 // ALMACENAMIENTO LOCAL DE TILDES (OFFLINE DRAFT)
 // =========================================================

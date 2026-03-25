@@ -158,7 +158,7 @@ tr:last-child td { border-bottom: none; }
 .toast-msg.ok { background-color: var(--success); color: white; border: 1px solid #059669; }
 .toast-msg.info { background-color: var(--info); color: white; border: 1px solid #2563eb; }
 .toast-msg.warn { background-color: var(--warn); color: white; border: 1px solid var(--primary-dark); }
-.toast-msg.warn { background-color: var(--warn); color: white; border: 1px solid var(--primary-dark); }
+
 
 /* BANNER DE CONEXIÓN */
 #offlineBanner {
