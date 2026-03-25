@@ -30,7 +30,8 @@ const appState = {
     isTakingOrder: false,
     isCompletingOrder: false,
     isReleasingOrder: false,
-    isReportingIssue: false
+    isReportingIssue: false,
+    shouldReloadOnResume: false
 };
 
 let pendingReopenParams = null; 
@@ -180,6 +181,25 @@ window.addEventListener('offline', () => {
     if (banner) banner.classList.add('active');
 });
 
+document.addEventListener('visibilitychange', () => {
+    const isPickViewActive = $('view-pick')?.classList.contains('active');
+    const currentOrderId = appState.currentOrder?.id || appState.currentOwnInProgressOrderId || null;
+
+    if (document.visibilityState === 'hidden') {
+        appState.shouldReloadOnResume = !!isPickViewActive;
+        if (isPickViewActive && currentOrderId) {
+            saveResumeOrderId(currentOrderId);
+        }
+        return;
+    }
+
+    if (document.visibilityState === 'visible' && appState.shouldReloadOnResume) {
+        appState.shouldReloadOnResume = false;
+        showToast('Reconectando pedido...', 'info');
+        setTimeout(() => location.reload(), 150);
+    }
+});
+
 async function rehydrateApp() {
     return;
 }
@@ -204,6 +224,19 @@ function loadDraftLocal(orderId, items) {
 
 function clearDraftLocal(orderId) {
     localStorage.removeItem(`draft_order_${orderId}`);
+}
+
+function saveResumeOrderId(orderId) {
+    if (!orderId) return;
+    localStorage.setItem('resume_order_id', String(orderId));
+}
+
+function getResumeOrderId() {
+    return localStorage.getItem('resume_order_id');
+}
+
+function clearResumeOrderId() {
+    localStorage.removeItem('resume_order_id');
 }
 
 // =========================================================
@@ -277,6 +310,7 @@ async function performLogout() {
   appState.selectedPublicacionesFile = null;
   
   pendingReopenParams = null;
+  clearResumeOrderId();
   
   const vF = $('ventasFile'); if(vF) vF.value = '';
   const pF = $('publicacionesFile'); if(pF) pF.value = '';
@@ -315,6 +349,20 @@ async function bootstrapSession() {
     const translatedRole = roleMap[role] || role;
     $('adminUserLabel').textContent = `${appState.user.email} | rol: ${translatedRole}`;
     $('workerUserLabel').textContent = `${appState.user.email} | rol: ${translatedRole}`;
+
+    const resumeOrderId = getResumeOrderId();
+
+    if (role === 'worker' && resumeOrderId) {
+      try {
+        appState.currentOwnInProgressOrderId = resumeOrderId;
+        await loadOrderForPicking(resumeOrderId);
+        clearResumeOrderId();
+        return;
+      } catch (resumeErr) {
+        console.error('No se pudo reabrir el pedido al volver:', resumeErr);
+        clearResumeOrderId();
+      }
+    }
 
     await routeByRole();
   } catch (err) {
@@ -1264,6 +1312,7 @@ async function loadOrderForPicking(orderId) {
     if (error) throw error;
 
     appState.currentOrder = data;
+    saveResumeOrderId(data.id);
 
     // MAGIA LOCAL: Recuperamos los tildes si la app se había cerrado o refrescado
     appState.currentOrder.order_items = loadDraftLocal(data.id, data.order_items);
@@ -1411,11 +1460,9 @@ async function completeCurrentOrder() {
   try {
     await ensureValidSession();
     
-    // Filtramos solo los IDs de los productos que el operario tildó
     const items = appState.currentOrder.order_items || [];
     const checkedItemIds = items.filter(i => i.checked).map(i => i.id);
     
-    // Mandamos 1 ÚNICA PETICIÓN con todos los datos
     const { error } = await sb.rpc('complete_order_bulk', { 
         p_order_id: orderId, 
         p_checked_item_ids: checkedItemIds 
@@ -1423,8 +1470,9 @@ async function completeCurrentOrder() {
     
     if (error) throw error;
 
-    // Limpiamos la memoria local porque ya se confirmó
     clearDraftLocal(orderId);
+    clearResumeOrderId();
+    appState.currentOrder = null;
     appState.currentOwnInProgressOrderId = null;
     await proceedToNextOrHome(currentImportId);
     
@@ -1457,6 +1505,7 @@ async function executeReleaseOrder() {
     if (error) throw error;
 
     clearDraftLocal(appState.currentOrder.id);
+    clearResumeOrderId();
     appState.currentOwnInProgressOrderId = null;
     appState.currentOrder = null;
 
@@ -1491,6 +1540,8 @@ async function reportCurrentIssue() {
     if (error) throw error;
 
     clearDraftLocal(orderId);
+    clearResumeOrderId();
+    appState.currentOrder = null;
     appState.currentOwnInProgressOrderId = null;
     $('issueNote').value = '';
     
@@ -1602,7 +1653,9 @@ function bindEvents() {
       sb.auth.onAuthStateChange(async (_event, session) => {
         appState.user = session?.user || null;
         if (!appState.user) {
-          appState.role = null; appState.currentOrder = null; appState.currentOwnInProgressOrderId = null;
+          appState.role = null;
+          appState.currentOrder = null;
+          appState.currentOwnInProgressOrderId = null;
           showView('view-login');
           return;
         }
