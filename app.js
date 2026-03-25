@@ -188,6 +188,7 @@ document.addEventListener('visibilitychange', () => {
 
     if (document.visibilityState === 'hidden') {
         if (isPickViewActive && currentOrderId) {
+            // Solo guardamos el contexto por si el celular cierra la app del todo para liberar RAM
             saveResumeContext({
                 orderId: currentOrderId,
                 importId: currentOrder?.import_id || null,
@@ -195,10 +196,12 @@ document.addEventListener('visibilitychange', () => {
                 batchName: appState.currentViewedBatchName || '',
                 fromView: 'view-pick'
             });
-            localStorage.setItem('resume_reload_pending', '1');
         }
-        return;
     }
+    
+    // Eliminamos por completo la lógica de 'visible' que hacía el location.reload().
+    // Si el usuario vuelve a la app, el navegador simplemente muestra lo que ya estaba.
+});
 
     if (document.visibilityState === 'visible') {
         const shouldReload = localStorage.getItem('resume_reload_pending') === '1';
@@ -388,7 +391,8 @@ if (role === 'worker' && resumeCtx?.orderId) {
     return;
   } catch (resumeErr) {
     console.error('No se pudo reabrir el pedido al volver:', resumeErr);
-    clearResumeContext();
+    clearResumeContext(); // Muy importante limpiar si falla
+    appState.currentOwnInProgressOrderId = null; // Reiniciamos el estado
   }
 }
 
@@ -1591,6 +1595,7 @@ async function reportCurrentIssue() {
 }
 
 async function backToPanel() {
+  clearResumeContext(); // Agregamos esto para limpiar la memoria de "reconexión"
   showView('view-worker-home');
   await refreshWorkerHome();
 }
